@@ -3,15 +3,15 @@
 """
 PlasBin-flow main script
 """
-
-from re import L
-from gurobipy import *
-from sys import argv
 import os
 import time
-from random import randint
 import argparse
 import logging
+from sys import argv
+
+from random import randint
+from re import L
+from gurobipy import *
 import networkx as nx
 import pandas as pd
 
@@ -22,6 +22,7 @@ from data_utils import (
     SEED_KEY,
     COV_KEY,
     SCORE_KEY,
+    ASS_PENALTY_KEY,
     UNICYCLER_TAG,
     DEFAULT_SOURCE,
     DEFAULT_SINK,
@@ -36,33 +37,36 @@ from data_utils import (
     read_gc_data,
     read_links_data,
     get_capacities,
-    log_data
+    log_data,
 )
 from log_errors_utils import (
     process_exception,
     check_number_range,
     check_file,
-    create_directory
+    create_directory,
 )
 
 SOURCE = DEFAULT_SOURCE
 SINK = DEFAULT_SINK
 
+MAX_THREADS = 32
+
 DEFAULT_SCORE_OFFSET = 0.5
 DEFAULT_ALPHA1 = 1
 DEFAULT_ALPHA2 = 1
 DEFAULT_ALPHA3 = 1
+DEFAULT_ALPHA4 = 1
 DEFAULT_RMITER_MAX = 50
 DEFAULT_MIN_PLS_LEN = 1500
 DEFAULT_GUROBI_MIP_GAP = 0.05
-DEFAULT_GUROBI_TIME_LIMIT = 2400
+DEFAULT_GUROBI_TIME_LIMIT = 120
 
 def parse_arguments():
     description = 'PlasBin-flow: A flow-based MILP algorithm for plasmid contigs binning'
 
     #Parsing arguments
     parser = argparse.ArgumentParser(description=description)
-
+    
     #Input
     pbf_input = parser.add_argument_group('Input')
     pbf_input.add_argument("-ag", help="Path to assembly graph file")
@@ -81,6 +85,7 @@ def parse_arguments():
     obj_params.add_argument("-alpha1", type=int, default=DEFAULT_ALPHA1, help="Weight of flow term")
     obj_params.add_argument("-alpha2", type=int, default=DEFAULT_ALPHA2, help="Weight of GC content term")
     obj_params.add_argument("-alpha3", type=int, default=DEFAULT_ALPHA3, help="Weight of plasmid score term")
+    obj_params.add_argument("-alpha4", type=int, default=DEFAULT_ALPHA4, help="Weight of assembly PENALTY term")
 
     #Parameters for fixing seed contigs	
     seed_params = parser.add_argument_group('Seed contig threshold parameters')
@@ -100,7 +105,8 @@ def parse_arguments():
     other.add_argument("-min_pls_len", type=int, default=DEFAULT_MIN_PLS_LEN, help="Minimum plasmid length to be reported")
     other.add_argument("-min_ctg_len", type=int, default=DEFAULT_MIN_CTG_LEN, help="Minimum contig length to account for plasmid score")
     other.add_argument("-default_pls_score", type=float, default=DEFAULT_PLS_SCORE, help="Default plasmid score")
-   
+    other.add_argument("--nopenalty", action='store_true', default=False, help="No penalty for contigs")
+    
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -118,6 +124,7 @@ if __name__ == "__main__":
     alpha1 = float(args.alpha1)
     alpha2 = float(args.alpha2)
     alpha3 = float(args.alpha3)
+    alpha4 = float(args.alpha4)
 
     seed_len = args.seed_len
     seed_score = args.seed_score    
@@ -135,12 +142,13 @@ if __name__ == "__main__":
     # Initialize logging
     logging.basicConfig(
         filename=log_file,
-        filemode='w',
+        filemode="w",
         level=logging.INFO,
-        format='%(name)s - %(levelname)s - %(message)s'
+        format="%(name)s - %(levelname)s - %(message)s",
     )
 
     # Checking the values of parameters
+    check_number_range(p, (0.0, 1.0), msg='INPUT\tParameter "-p", {p}: ')
     check_number_range(
         p, (0.0,1.0),
         msg=f'INPUT\tParameter "-p", {p}: '
@@ -157,6 +165,11 @@ if __name__ == "__main__":
         alpha3, (0.0,None),
         msg=f'INPUT\tParameter "-alpha3", {alpha3}: '
     )
+    check_number_range(
+        alpha4, (0.0,None),
+        msg=f'INPUT\tParameter "-alpha4", {alpha4}: '
+    )
+    
     check_number_range(
         seed_len, (0,None),
         msg=f'INPUT\tParameter "-seed_len", {seed_len}: '
@@ -187,12 +200,14 @@ if __name__ == "__main__":
     )
 
     # Checking that input files exist and are not empty (warning if empty)
-    input_files = [
-        assembly_file, score_file, gc_prob_file
-    ] + [gc_int_file] if (gc_int_file is not None) else []
+    input_files = (
+        [assembly_file, score_file, gc_prob_file] + [gc_int_file]
+        if (gc_int_file is not None)
+        else []
+    )
     for in_file in input_files:
         check_file(in_file)
-    
+
     # Reading and checking data
     contigs_dict = read_ctgs_data(
         assembly_file, score_file,
@@ -219,7 +234,8 @@ if __name__ == "__main__":
     #Naming and creating output files
     output_folder = output_dir
     create_directory([output_folder])
-        
+
+
     output_bins = open(os.path.join(output_folder, output_file), "w")
 
     #-----------------------------------------------
@@ -247,6 +263,10 @@ if __name__ == "__main__":
         incoming, outgoing = {}, {}   #Key: Extremity, Value: List of ordered links in/out of extremity
 
         contigs_df = pd.DataFrame.from_dict(contigs_dict).T
+        # MAX_COV = 3000
+        # MIN_COV = 1
+        # MAX_COV = max(contigs_df[COV_KEY])
+        # MIN_COV = min(contigs_df[COV_KEY])
         MAX_COV = max(contigs_df[COV_KEY])
         MIN_COV = min(contigs_df[COV_KEY])
 
@@ -256,15 +276,16 @@ if __name__ == "__main__":
             incoming[ext1], incoming[ext2] = [], []
             outgoing[ext1], outgoing[ext2] = [], []
             if c in seeds_set:
-                extr_dict[ext1], extr_dict[ext2] = [(SOURCE,ext1)], [(SOURCE,ext2)]
+                extr_dict[ext1], extr_dict[ext2] = [(SOURCE, ext1)], [(SOURCE, ext2)]
                 incoming[ext1], incoming[ext2] = [(SOURCE, ext1)], [(SOURCE, ext2)]
-                extr_dict[ext1], extr_dict[ext2] = [(ext1,SINK)], [(ext2,SINK)]
+                extr_dict[ext1], extr_dict[ext2] = [(ext1, SINK)], [(ext2, SINK)]
             outgoing[ext1], outgoing[ext2] = [(ext1, SINK)], [(ext2, SINK)]
 
             for link in links_list:
                 if link[0] == ext1 or link[1] == ext1:
                     extr_dict[ext1].append(link)
                     extr_dict[ext1].append(link[::-1])
+                ## ELSEIF?
                 if link[0] == ext2 or link[1] == ext2:
                     extr_dict[ext2].append(link)
                     extr_dict[ext2].append(link[::-1])
@@ -282,13 +303,14 @@ if __name__ == "__main__":
         logging.info(f'Number of edges: {len(links_list)}')
 
         #-----------------------------------------------
-	#Initializing the ILP
+    #Initializing the ILP
         m = Model("Plasmids")
+        m.params.Threads=MAX_THREADS
         m.params.LogFile= os.path.join(output_folder,'m.log')
         m.setParam(GRB.Param.TimeLimit, gurobi_time_limit)
         m.setParam(GRB.Param.MIPGap, gurobi_mip_gap)
 
-	#Initializing variables
+    #Initializing variables
         contigs = {}	#Key: Contig (e.g. '1'), Value: Gurobi binary variable
         contigs = model_setup.contig_vars(m, contigs_dict, contigs)
 
@@ -306,7 +328,7 @@ if __name__ == "__main__":
         F = m.addVar(vtype=GRB.CONTINUOUS, name='overall-flow')	
 
         #-----------------------------------------------
-	#Setting up the expression for the objective function
+    #Setting up the expression for the objective function
         expr = LinExpr()
 
         expr.addTerms(alpha1, F)
@@ -314,39 +336,45 @@ if __name__ == "__main__":
             for b in plas_GC:
                 expr.addTerms(alpha2*(gc_pens[c][b]), contig_GC[c][b])
             expr.addTerms(alpha3*(contigs_dict[c][SCORE_KEY] - p), contigs[c])
+            if not args.nopenalty:
+                assembly_penalty = alpha4 * contigs_dict[c][ASS_PENALTY_KEY]
+                if assembly_penalty > 1.0:
+                    assembly_penalty = 1.0
+                expr.addTerms(-assembly_penalty, contigs[c])
+
         m.setObjective(expr, GRB.MAXIMIZE)
 
         #-----------------------------------------------
-	#Setting up constraints
+    #Setting up constraints
 
         constraint_count = 0
         
-	#Constraint type 1: A link 'e' is in the plasmid only if both its endpoints are in the plasmid.
+    #Constraint type 1: A link 'e' is in the plasmid only if both its endpoints are in the plasmid.
         m, constraint_count = model_setup.link_inclusion_constr(m, links, contigs, constraint_count)
 
-	#Constraint type 2: An extremity is in the plasmid only if at least one link is incident on it.
+    #Constraint type 2: An extremity is in the plasmid only if at least one link is incident on it.
         m, constraint_count = model_setup.extr_inclusion_constr(m, links, contigs, extr_dict, constraint_count)
 
-	#Constraint type 3: A contig is considered to be a ”counted” seed if it is eligible to be a seed contig
-	#                   and is considered to be part of the solution
+    #Constraint type 3: A contig is considered to be a ”counted” seed if it is eligible to be a seed contig
+    #                   and is considered to be part of the solution
         m, constraint_count = model_setup.seed_inclusion_constr(m, contigs, contigs_dict, constraint_count)
 
-	#Constraint type 4: 'F' should equal the flow out of SOURCE and into SINK. 
-	#                   Exactly one edge exits SOURCE and exactly one enters SINK.
+    #Constraint type 4: 'F' should equal the flow out of SOURCE and into SINK. 
+    #                   Exactly one edge exits SOURCE and exactly one enters SINK.
         m, constraint_count = model_setup.min_flow_constr(m, links, flows, F, MIN_COV, constraint_count)
 
-	#Constraint types 5 and 6
-	#Conservation constraints: Flow into ('u',DEFAULT_HEAD_STR) (resp. ('u',DEFAULT_TAIL_STR) ) should be equal to flow out of ('u',DEFAULT_TAIL_STR) (resp. ('u',DEFAULT_HEAD_STR) ).
-	#Capacity constraints    : The maximum flow into a vertex should be at most the capacity (read depth) of the vertex itself.
-	#	                       The maximum flow through an edge has to be at most the capacity (capacities[e]) of the edge.
+    #Constraint types 5 and 6
+    #Conservation constraints: Flow into ('u',DEFAULT_HEAD_STR) (resp. ('u',DEFAULT_TAIL_STR) ) should be equal to flow out of ('u',DEFAULT_TAIL_STR) (resp. ('u',DEFAULT_HEAD_STR) ).
+    #Capacity constraints    : The maximum flow into a vertex should be at most the capacity (read depth) of the vertex itself.
+    #	                       The maximum flow through an edge has to be at most the capacity (capacities[e]) of the edge.
         m, constraint_count = model_setup.flow_conservation_constraints(m, links, contigs, flows, incoming, outgoing, capacities, contigs_dict, constraint_count)
 
-	#Constraint types 7 and 8
-	#7. The overall flow 'F' through link 'e' is ”counted” only if 'e' is part of the solution.
-	#8. The overall flow 'F' cannot exceed the flow through any active link 'e'.
+    #Constraint types 7 and 8
+    #7. The overall flow 'F' through link 'e' is ”counted” only if 'e' is part of the solution.
+    #8. The overall flow 'F' cannot exceed the flow through any active link 'e'.
         m, constraint_count = model_setup.counted_flow_constr(m, links, flows, counted_F, F, MAX_COV, constraint_count)
 
-	#Constraint type 9: Handling the GC-content term in the objective function
+    #Constraint type 9: Handling the GC-content term in the objective function
         m, constraint_count = model_setup.GC_constr(m, contig_GC, plas_GC, contigs, constraint_count)
 
         extra_comps = 1	#default
@@ -354,7 +382,7 @@ if __name__ == "__main__":
         dc_count = 0
         dc_dict = {}
         while extra_comps >= 1 and rmiter_count <= rmiter_max:
-	        #Running the MILP
+            #Running the MILP
             start = time.time()
             m.optimize()
             stop = time.time()
@@ -363,7 +391,7 @@ if __name__ == "__main__":
 
             rmiter_count += 1
 
-	    #Message if solution not obtained
+        #Message if solution not obtained
             if m.status == GRB.Status.INFEASIBLE:
                 logging.warning(f'MILP\tThe model cannot be solved because it is infeasible')
             elif m.status == GRB.Status.UNBOUNDED:
@@ -371,7 +399,7 @@ if __name__ == "__main__":
             elif m.status == GRB.Status.INF_OR_UNBD:
                 logging.warning(f'MILP\tThe model cannot be solved because it is infeasible or unbounded ')
 
-	    #Storing Irreducible Inconsistent Subsystem in case solution is not obtained
+        #Storing Irreducible Inconsistent Subsystem in case solution is not obtained
             if m.status == GRB.Status.INF_OR_UNBD or m.status == GRB.Status.INFEASIBLE:
                 logging.warning(f'MILP\tStoring Irreducible Inconsistent Subsystem in m.ilp')
                 m.computeIIS()
@@ -384,11 +412,11 @@ if __name__ == "__main__":
             logging.info(f'Solution:')
             logging.info(m.printAttr('x'))
 
-	    #Flow zero condition
+        #Flow zero condition
             if F.x == 0:
                 exit(1)			
 
-	    #Finding components in the solution
+        #Finding components in the solution
             G = nx.DiGraph()
             for c in contigs:
                 if contigs[c].x > 0:
@@ -435,25 +463,28 @@ if __name__ == "__main__":
                         m.addConstr(links[e] == 0, "muted_edge-"+str(e))
                         logging.info(f'{str(e)}')	
 
-	    #Condition to stop iterating: If number of connected components is 1, there are no extra components, thus breaking the while loop.
+        #Condition to stop iterating: If number of connected components is 1, there are no extra components, thus breaking the while loop.
             extra_comps = comp_count - 1			
 
-	#Recording the plasmid bin if the plasmid is long enough
+    #Recording the plasmid bin if the plasmid is long enough
         plasmid_length = 0
         for c in contigs:
             if contigs[c].x > 0:
                 plasmid_length += contigs_dict[c][LEN_KEY]
-
+        logging.info(f'Plasmid length: {plasmid_length} and min_pls_len: {min_pls_len}')
         if plasmid_length >= min_pls_len:
-	    #Recording objective function scores
+        #Recording objective function scores
             GC_sum = 0
             gd_sum = 0
+            as_sum = 0
             for c in contigs:
                 gc_c_sum = 0
                 for b in contig_GC[c]:
                     GC_sum += alpha2*(gc_pens[c][b])*contig_GC[c][b].x
                     gc_c_sum += alpha2*(gc_pens[c][b])*contig_GC[c][b].x
                 gd_sum += alpha3*(contigs_dict[c][SCORE_KEY]-0.5)*contigs[c].x
+                if not args.nopenalty:
+                    as_sum -= (contigs_dict[c][ASS_PENALTY_KEY]) * contigs[c].x
                 lr_gd = (contigs_dict[c][SCORE_KEY]-0.5)*contigs[c].x
 
             #Recording components in the solution
@@ -492,7 +523,7 @@ if __name__ == "__main__":
             comp_count = 0
             for comp in conn_comps:
                 n_bins += 1
-                pbf_bins[n_bins] = {'Flow': F.x, 'GC_bin': GC_bin, 'Contigs': {}}
+                pbf_bins[n_bins] = {'Flow': F.x, 'GC_bin': GC_bin, 'Length': plasmid_length, 'Contigs': {}}
                 comp_count += 1
                 comp_len = 0
                 for node in comp:
@@ -500,13 +531,23 @@ if __name__ == "__main__":
                         if node not in pbf_bins[n_bins]['Contigs']:
                             pbf_bins[n_bins]['Contigs'][node] = 0
 
-	#Updating assembly graph and formulation
+
+    # ### BUG: the following "for" loop(s) fail(s) if the minimum plasmid length requirment is not met
+    #     else:
+    #         continue 
+    
+    #Updating assembly graph and formulation
         for e in flows:
             if e[1] != SINK:
                 c = e[1][0]
                 contigs_dict[c][COV_KEY] = max(0, contigs_dict[c][COV_KEY] - flows[e].x)
-                if c in pbf_bins[n_bins]['Contigs']:
-                    pbf_bins[n_bins]['Contigs'][c] += round(flows[e].x / F.x, 2)
+                logging.info("debug!!")
+                logging.info(f"{pbf_bins}, {n_bins}, {c}, {contigs_dict[c][COV_KEY]}, {flows[e].x}, {F.x}")
+                logging.info("!!debug")
+                
+                if pbf_bins != {}: # if the minimum plasmid length requirment is not met, pbf_bins is empty
+                    if c in pbf_bins[n_bins]['Contigs']:
+                        pbf_bins[n_bins]['Contigs'][c] += round(flows[e].x / F.x, 2)
 
         for c in contigs:
             if contigs[c].x > 0:
@@ -525,20 +566,20 @@ if __name__ == "__main__":
                             temp_list.append(e)
                     links_list = temp_list	
 
-
-    output_bins.write('#Pls_ID\tFlow\tGC_bin\tContigs\n')
+         
+    output_bins.write('#Pls_ID\tFlow\tGC_bin\tLength\tContigs\n')
     for p in pbf_bins:
-        fval = "%.2f" %pbf_bins[p]['Flow']
-        gcb = pbf_bins[p]['GC_bin']
-        print(p, fval, gcb, pbf_bins[p]['Contigs'])
-
-        output_bins.write('P'+str(p)+'\t'+str(fval)+'\t'+str(gcb)+'\t')
+        fval = "%.2f" % pbf_bins[p]["Flow"]
+        gcb = pbf_bins[p]["GC_bin"]
+        pl_length = pbf_bins[p]["Length"]
+        
+        output_bins.write("P" + str(p) + "\t" + str(fval)  + "\t"+ str(gcb) + "\t" + str(pl_length) + "\t" )
         nctg = 0
-        for c in pbf_bins[p]['Contigs']:
-            ctg_mul = pbf_bins[p]['Contigs'][c]
+        for c in pbf_bins[p]["Contigs"]:
+            ctg_mul = pbf_bins[p]["Contigs"][c]
             if nctg == 0:
-                output_bins.write(c+':'+str(ctg_mul))
+                output_bins.write(c + ":" + str(ctg_mul))
             else:
-                output_bins.write(','+c+':'+str(ctg_mul))
+                output_bins.write("," + c + ":" + str(ctg_mul))
             nctg += 1
         output_bins.write('\n')

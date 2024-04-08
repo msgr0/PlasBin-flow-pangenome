@@ -16,7 +16,11 @@ from log_errors_utils import (
     check_num_fields,
     CustomException
 )
-
+UNICYCLER_TAG = "unicycler"
+SKESA_TAG = "skesa"
+PANGENOME_TAG = "pangenome"
+ASSEMBLER_COV_TAG = {UNICYCLER_TAG: "dp", SKESA_TAG: None, PANGENOME_TAG:"cv"}
+ASSEMBLY_PENALTY_TAG = "ap"
 # Generic file functions
 
 def __open_file_read(in_file_path, gzipped=False):
@@ -322,16 +326,16 @@ def read_GFA_id(in_file_path, gzipped=False, id_fun=lambda x: x):
         for ctg_id in list(
                 read_GFA_ctgs(
                     in_file_path,
-                    attributes_list=[],
-                    ctg_fun=lambda x: None,
+                    record_fun=lambda x: None,
                     gzipped=gzipped
                 ).keys()
         )
     ]
 
 def read_GFA_attribute(in_file_path, att_key, gzipped=False, id_fun=lambda x: x):
+    # Computes the length of segments (contigs) in a GFA file ???? # TODO CHECK
     """
-    Computes the length of segments (contigs) in a GFA file
+    Return the list of contig:attribute pairs # TODO new description probably?
 
     Args:
         - in_file_path (str): path of GFA file to read
@@ -350,6 +354,7 @@ def read_GFA_attribute(in_file_path, att_key, gzipped=False, id_fun=lambda x: x)
                 gzipped=gzipped,
                 id_fun=id_fun
         ).items()
+
     }
 
 def read_GFA_len(in_file_path, gzipped=False, id_fun=lambda x: x):
@@ -410,6 +415,27 @@ def _ctgs_normalized_coverage(attributes_dict):
         for ctg_id, ctg_data in attributes_dict.items()
     }
 
+def read_GFA_ass_penalty(in_file_path, gzipped=False, id_fun=lambda x: x):
+    """
+    Computes assemby_penalty of segments (fragments) in a Pangenome-GFA file
+    
+    Args:
+        - in_file_path (str): path of FASTA file to read
+        - ass_key (str or None): attribute key that records normalized coverage
+           if None, coverage is based on attributes KC and LN
+        - gzipped (bool): True if file is gzipped
+        - id_fun: function that process a contig id
+    
+    Returns:
+        - (Dictionary): sequence id (str) -> assembly penalty (float) [0.0, 1.0]
+    """
+    ## se c'e', leggo dal gfa
+    ## se non c'e' lo computo? come la normalized coverage
+    
+    ## If not tag ap:i:0
+    
+    return read_GFA_attribute(in_file_path, att_key=ASSEMBLY_PENALTY_TAG, gzipped=gzipped, id_fun=lambda x: x)
+
 def read_GFA_normalized_coverage(in_file_path, cov_key=None, gzipped=False, id_fun=lambda x: x):
     """
     Computes normalized coverage of segments (contigs) in a GFA file
@@ -426,6 +452,7 @@ def read_GFA_normalized_coverage(in_file_path, cov_key=None, gzipped=False, id_f
     """
     
     if cov_key is None:
+        # print('entered in skesa')
         ctgs_data = read_GFA_ctgs(
             in_file_path,
             [GFA_LEN_KEY, 'KC'],
@@ -438,7 +465,13 @@ def read_GFA_normalized_coverage(in_file_path, cov_key=None, gzipped=False, id_f
             process_exception(f'GFA\tComputing normalized coverage {in_file_path}: {e}')
         else:
             return result
-    else:
+    elif cov_key == "dp":
+        # print('entered uni')
+        return read_GFA_attribute(
+            in_file_path, cov_key, gzipped=gzipped, id_fun=id_fun
+        )
+    elif cov_key == "cv":
+        # print('entered pangenome')
         return read_GFA_attribute(
             in_file_path, cov_key, gzipped=gzipped, id_fun=id_fun
         )

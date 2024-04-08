@@ -36,7 +36,6 @@ def link_vars(m, links_list, links, contigs):
         links[(t_ext,DEFAULT_SINK)] = m.addVar(vtype=GRB.BINARY, name='link-'+c+'-t-to-T')
     return links
 
-#TODO
 def GC_vars(m, gc_probs, plas_GC, contig_GC):
     for c in gc_probs:
         contig_GC[c] = {}
@@ -70,16 +69,26 @@ def flow_vars(m, links, flows, counted_overall_flow):
 #SETTING CONSTRAINTS
 #-----------------------------------------------------------	
 def link_inclusion_constr(m, links, contigs, constraint_count):
-	for e in links:	
-		end1, end2 = e[0], e[1]
-		c1, c2 = end1[0], end2[0]
-		if c1 != DEFAULT_SOURCE and c1 != DEFAULT_SINK:
-			m.addConstr(links[e] <= contigs[c1], "link_ubd-"+str(e)+'-by-'+str(c1))
-			constraint_count += 1
-		if c2 != DEFAULT_SOURCE and c2 != DEFAULT_SINK:	
-			m.addConstr(links[e] <= contigs[c2], "link_ubd-"+str(e)+'-by-'+str(c2))
-			constraint_count += 1
-	return m, constraint_count
+    # print("contigs:", contigs)
+    for e in links:
+        # print("link:", e)
+        end1, end2 = e[0], e[1]
+        # print("end1:", end1)
+        # print("end2:", end2)
+        c1, c2 = end1[0], end2[0]
+        # print("c1:", c1)
+        # print("c2:", c2)
+
+        ## problem with 't' SINK, check if it is a problem with the data or the code
+        # if c1 != DEFAULT_SOURCE and (c1 != DEFAULT_SINK):
+        if c1 != DEFAULT_SOURCE and not(c1 == DEFAULT_SINK or c1==DEFAULT_TAIL_STR):
+            m.addConstr(links[e] <= contigs[c1], "link_ubd-"+str(e)+'-by-'+str(c1))
+            constraint_count += 1
+        # if c2 != DEFAULT_SOURCE and (c2 != DEFAULT_SINK):	
+        if c2 != DEFAULT_SOURCE and not(c2 == DEFAULT_SINK or c2==DEFAULT_TAIL_STR):	
+            m.addConstr(links[e] <= contigs[c2], "link_ubd-"+str(e)+'-by-'+str(c2))
+            constraint_count += 1
+    return m, constraint_count
 
 def extr_inclusion_constr(m, links, contigs, extr_dict, constraint_count):
     for c in contigs:

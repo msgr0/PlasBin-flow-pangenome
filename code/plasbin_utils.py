@@ -121,9 +121,10 @@ python plasbin_tuning.py preprocessing --input_file input_file --out_dir out_dir
   gene_density (one per sample, <sample>.gene_density.tsv)
   GC content probabilities files  (one per sample, <sample>.gc.tsv)
 - tmp_dir: temporary directory, not deleted
+
 - gc_intervals: [optional] GC content intervals file
   required if input_file does not contain a field gc_probability
-- pls_db_file: [optional] plasmid genes database
+- pls_db_file: [optional] plasmid genes database # TODO check in repo
   required if input_file does not contain a field pls_score
 - p: [optional] percent identity threshold to define a mapping to a plasmid (default=0.95)
   required if input_file does not contain a field pls_score
@@ -208,7 +209,7 @@ def check_missing_data(samples_df, required_columns):
     for sample,data_sample in samples_df.iterrows():
         for col,data_col in data_sample.items():
             if col in required_columns and pd.isnull(data_col):
-                missing_data.append(f'{sample}.{col}')
+                missing_data.append(f"{sample}.{col}")
     return missing_data
 
 def read_samples(in_csv_file, required_columns):
