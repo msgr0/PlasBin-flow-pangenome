@@ -1,3 +1,7 @@
+PlasBin-flow pangenome
+---
+
+# FORKED FROM:
 # PlasBin-flow: A flow-based MILP algorithm for plasmid contigs binning
 
 PlasBin-flow is a tool aimed at extracting from the **assembly graph**
